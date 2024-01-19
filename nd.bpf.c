@@ -10,7 +10,7 @@
 #include <linux/ipv6.h>
 
 
-struct key_pst_addr {
+struct key_addr_pair {
     u32 src_addr;
     u32 dst_addr;
 };
@@ -20,11 +20,11 @@ struct key_new_addr {
     u64 timestamp;
 };
 
-BPF_HASH(pst_addr_hash, struct key_pst_addr);
-BPF_QUEUE(new_addr_queue, struct key_new_addr, 10240);
-BPF_HASH(count_hash, u32, u32);
+BPF_HASH(prev_access_hash, struct key_addr_pair); //store previous access - sec-addr dst-addr pair
+BPF_QUEUE(new_access_queue, struct key_new_addr, 10240); //hold new access -- src_addr time pair
+BPF_HASH(count_hash, u32, u32); // count scan per src-addr;
 
-
+/*
 static inline int parse_ipv4(void* data, u64 nh_off, void* data_end){
     struct iphdr* iph = data + nh_off;
 
@@ -40,7 +40,7 @@ static inline int parse_ipv6(void* data, u64 nh_off, void* data_end){
         return 0;
     return ip6h->nexthdr;
 }
-
+*/
 
 int xdp_nd(struct xdp_md *ctx){
     void* data = (void *)(long)ctx->data;
@@ -59,29 +59,33 @@ int xdp_nd(struct xdp_md *ctx){
     struct iphdr *iph = data + nh_off;
     
     if (data + nh_off + sizeof(struct iphdr) > data_end)
-        return XDP_ABORTED;
+        return XDP_DROP;
 
-
-    struct key_pst_addr addr_pair = { (iph->saddr), (iph->daddr) };
-
-    if(!(pst_addr_hash.lookup(&addr_pair))) { // new src-dst pair
+    
+    struct key_addr_pair addr_pair = { (iph->saddr), (iph->daddr) };
+    
+    if(!(prev_access_hash.lookup(&addr_pair))) { // new src-dst pair
         u64 val = 1;
-        pst_addr_hash.insert(&addr_pair, &val);
-        struct key_new_addr new_access = { (iph->saddr), bpf_ktime_get_ns() };
-        new_addr_queue.push(&new_access, BPF_EXIST);
+        prev_access_hash.insert(&addr_pair, &val);
+        struct key_new_addr new_addr = { (iph->saddr), bpf_ktime_get_ns() };
+        new_access_queue.push(&new_addr, BPF_EXIST);
     }
     else{
-        pst_addr_hash.increment(addr_pair);
+        prev_access_hash.increment(addr_pair);
     }
     
+    
     struct key_new_addr old_access = {0,0};
-    while(new_addr_queue.peek(&old_access) == 0){
+    while(new_access_queue.peek(&old_access) == 0){
         if(bpf_ktime_get_ns() - (old_access.timestamp) > 5000000000){
-            new_addr_queue.pop(&old_access);
+            new_access_queue.pop(&old_access);
         }
         else
             break;
     }
+    
+
+    return XDP_PASS;
 
     /*if (h_proto == htons(ETH_P_8021Q) || h_proto == htons(ETH_P_8021AD)){
         struct vlan_hdr* vhdr;
@@ -93,6 +97,7 @@ int xdp_nd(struct xdp_md *ctx){
             h_proto = 
     }*/
 
+    /*
     u32 index;
 
     if (h_proto == htons(ETH_P_IP))
@@ -108,7 +113,7 @@ int xdp_nd(struct xdp_md *ctx){
     }
     else{
         return XDP_PASS;
-    }
+    }*/
 }
 
 /*int xdp_drop_icmp(struct xdp_md *ctx) {
