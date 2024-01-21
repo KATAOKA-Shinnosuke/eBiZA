@@ -8,6 +8,8 @@
 #include <linux/if_packet.h>
 #include <linux/ip.h>
 #include <linux/ipv6.h>
+#include <linux/tcp.h>
+#include <linux/udp.h>
 
 
 struct key_addr_pair {
@@ -93,14 +95,37 @@ int xdp_nd(struct xdp_md *ctx){
     struct key_new_addr old_access = {0,0};
     for(int i=0; i<2048; i++){
         if(new_access_queue.peek(&old_access) == 0 &&
-           bpf_ktime_get_ns() - (old_access.timestamp) > 50000000000){
+           bpf_ktime_get_ns() - (old_access.timestamp) > 60000000000){
                 new_access_queue.pop(&old_access);
                 count_hash.increment((iph->saddr), -1);
            }
         else
             break;
     }
-    
+
+
+    if (iph->protocol == IPPROTO_UDP){
+        if (data + nh_off + sizeof(struct iphdr) + sizeof(struct udphdr) > data_end)
+            return XDP_ABORTED;
+        struct udphdr *udph = (struct udphdr *)(iph + 1);
+        if (udph->dest != htons(1024)){
+            return XDP_PASS;
+        }
+        u32* dst = count_hash.lookup(&(iph->saddr));
+        if (dst)
+            udph->source = htons(50000 + *dst);
+    }
+    if (iph->protocol == IPPROTO_TCP){
+        if (data + nh_off + sizeof(struct iphdr) + sizeof(struct tcphdr) > data_end)
+            return XDP_ABORTED;
+        struct tcphdr *tcph = (struct tcphdr *)(iph + 1);
+        if (tcph->dest != htons(1024)){
+            return XDP_PASS;
+        }
+        u32* dst = count_hash.lookup(&(iph->saddr));
+        if (dst)
+            tcph->source = htons(50000 + *dst);
+    }
 
     return XDP_PASS;
 
